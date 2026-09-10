@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+**/node_modules/
+​
+# Production builds
+dist/
+build/
+**/dist/
+**/build/
+​
+# Vite and tool caches
+.vite/
+**/.vite/
+.cache/
+.parcel-cache/
+.eslintcache
+​
+# Environment variables and secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+​
+# Generated face-recognition model files
+# These are copied from @vladmandic/face-api during client postinstall.
+client/public/models/
+​
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+​
+# Test and coverage output
+coverage/
+.nyc_output/
+​
+# Local database and uploaded data
+data/
+server/data/
+uploads/
+server/uploads/
+*.sqlite
+*.sqlite3
+​
+# Runtime files
+*.pid
+*.pid.lock
+*.seed
+​
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+​
+# Operating-system files
+.DS_Store
+Thumbs.db
+desktop.ini
+​
+# Deployment-provider folders
+.vercel/
+.netlify/
+​
+# Temporary files
+tmp/
+temp/
+*.tmp
+​
