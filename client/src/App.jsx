@@ -19,9 +19,12 @@ import {
 
 import { describeActivity } from "./activityRules";
 
-const ACTIVITY_API = "/api/activities";
-const PEOPLE_API = "/api/people";
+const API_BASE = (
+  import.meta.env.VITE_API_URL || ""
+).replace(/\/+$/, "");
 
+const ACTIVITY_API = `${API_BASE}/api/activities`;
+const PEOPLE_API = `${API_BASE}/api/people`;
 const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
   inputSize: 224,
   scoreThreshold: 0.5,
