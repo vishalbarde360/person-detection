@@ -393,10 +393,18 @@ export default function App() {
       const cellVideoW = (CELL_WIDTH * video.videoWidth) / SAMPLE_WIDTH;
       const cellVideoH = (CELL_HEIGHT * video.videoHeight) / SAMPLE_HEIGHT;
 
-      const boxX = offsetX + cellVideoX * scale;
+      const rawX = offsetX + cellVideoX * scale;
       const boxY = offsetY + cellVideoY * scale;
       const boxW = cellVideoW * scale;
       const boxH = cellVideoH * scale;
+
+      /*
+       * video CSS मध्ये mirror (scaleX(-1)) आहे, त्यामुळे
+       * overlay वरच्या प्रत्येक box चा x हा horizontally
+       * स्वतः mirror करावा लागतो — canvas स्वतः mirror
+       * केलं तर त्यावरचा text उलटा दिसतो, म्हणून हे टाळलं.
+       */
+      const boxX = overlay.width - rawX - boxW;
 
       const intensity = Math.min(1, score / 60);
 
@@ -415,10 +423,11 @@ export default function App() {
 
       const [x, y, width, height] = prediction.bbox;
 
-      const boxX = offsetX + x * scale;
+      const rawX = offsetX + x * scale;
       const boxY = offsetY + y * scale;
       const boxW = width * scale;
       const boxH = height * scale;
+      const boxX = overlay.width - rawX - boxW;
 
       const color =
         prediction.class === "person" ? "#3ddc84" : "#4fa8ff";
