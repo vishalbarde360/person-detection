@@ -25,9 +25,8 @@ const API_BASE = (
 
 const ACTIVITY_API = `${API_BASE}/api/activities`;
 const PEOPLE_API = `${API_BASE}/api/people`;
-const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  inputSize: 224,
-  scoreThreshold: 0.5,
+const FACE_OPTIONS = new faceapi.SsdMobilenetv1Options({
+  minConfidence: 0.5,
 });
 
 /*
@@ -61,6 +60,14 @@ export default function App() {
   const streamRef = useRef(null);
   const previousFrameRef = useRef(null);
   const timerRef = useRef(null);
+  const motionRafRef = useRef(null);
+  const lastPredictionsRef = useRef([]);
+  const motionScoreRef = useRef(0);
+  const brightnessRef = useRef(100);
+  const cellStabilityRef = useRef(
+    new Uint8Array(GRID_COLS * GRID_ROWS),
+  );
+  const lastMotionUiUpdateRef = useRef(0);
 
   const busyRef = useRef(false);
   const lastEventRef = useRef("");
@@ -159,25 +166,32 @@ export default function App() {
       await video.play();
 
       setRunning(true);
+
+      /*
+       * Motion loop लगेच सुरू — AI models load होण्याची वाट न
+       * बघता, जेणेकरून movement detection ला अजिबात delay जाणवू नये.
+       */
+      motionRafRef.current = requestAnimationFrame(motionTick);
+
       setMessage("Loading AI models…");
 
       await Promise.all([
         cocoSsd
           .load({
-            base: "lite_mobilenet_v2",
+            base: "mobilenet_v2",
           })
           .then((model) => {
             objectModelRef.current = model;
           }),
 
-        faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+        faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
         faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
         faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
       ]);
 
       setMessage("Looking for activity and known faces…");
 
-      timerRef.current = window.setInterval(analyze, 1800);
+      analyzeLoop();
     } catch (exception) {
       const message =
         exception.name === "NotAllowedError"
@@ -193,10 +207,16 @@ export default function App() {
 
   function stopCamera() {
     if (timerRef.current) {
-      window.clearInterval(timerRef.current);
+      window.clearTimeout(timerRef.current);
     }
 
     timerRef.current = null;
+
+    if (motionRafRef.current) {
+      cancelAnimationFrame(motionRafRef.current);
+    }
+
+    motionRafRef.current = null;
 
     streamRef.current
       ?.getTracks()
@@ -210,6 +230,10 @@ export default function App() {
     previousFrameRef.current = null;
     busyRef.current = false;
     recognizedRef.current = "";
+    lastPredictionsRef.current = [];
+    motionScoreRef.current = 0;
+    brightnessRef.current = 100;
+    cellStabilityRef.current.fill(0);
 
     const overlay = overlayCanvasRef.current;
 
@@ -322,6 +346,13 @@ export default function App() {
 
     previousFrameRef.current = currentFrame;
 
+    /*
+     * Hysteresis: एका frame मध्ये threshold ओलांडला की लगेच
+     * "active" न ठरवता, सलग 2 frames मध्ये ओलांडला तरच active
+     * ठरवतो — यामुळे camera noise/light flicker मुळे होणारे
+     * false movement zones कमी होतात (जास्त अचूक movement detection).
+     */
+    const stability = cellStabilityRef.current;
     const cells = [];
 
     for (let row = 0; row < GRID_ROWS; row += 1) {
@@ -332,6 +363,15 @@ export default function App() {
           : 0;
 
         if (cellScore >= ZONE_MOTION_THRESHOLD) {
+          stability[cellIndex] = Math.min(
+            3,
+            stability[cellIndex] + 1,
+          );
+        } else {
+          stability[cellIndex] = 0;
+        }
+
+        if (stability[cellIndex] >= 2) {
           cells.push({ col, row, score: cellScore });
         }
       }
@@ -512,6 +552,48 @@ export default function App() {
       : null;
   }
 
+  /*
+   * मागचा analyze() (object detection + face recognition)
+   * पूर्ण होताच लगेच पुढचा सुरू — मध्ये कुठलाही artificial
+   * delay न ठेवता, hardware जितक्या वेगाने चालेल तितक्या वेगाने.
+   */
+  async function analyzeLoop() {
+    await analyze();
+
+    if (streamRef.current) {
+      timerRef.current = window.setTimeout(analyzeLoop, 0);
+    }
+  }
+
+  /*
+   * Motion + movement-zone overlay साठी वेगळा, हलका loop —
+   * हा प्रत्येक display frame ला (rAF, ~60fps) चालतो आणि
+   * जड object/face models च्या वेगावर अजिबात अवलंबून नाही,
+   * त्यामुळे movement detection मध्ये जाणवण्याइतका delay राहत नाही.
+   */
+  function motionTick() {
+    if (!streamRef.current) {
+      return;
+    }
+
+    const metrics = frameMetrics();
+
+    motionScoreRef.current = metrics.motionScore;
+    brightnessRef.current = metrics.brightness;
+
+    drawOverlay(lastPredictionsRef.current, metrics.cells);
+
+    const now = performance.now();
+
+    if (now - lastMotionUiUpdateRef.current > 120) {
+      lastMotionUiUpdateRef.current = now;
+      setMotion(Math.round(metrics.motionScore));
+      setActiveZones(metrics.cells.length);
+    }
+
+    motionRafRef.current = requestAnimationFrame(motionTick);
+  }
+
   async function analyze() {
     const video = videoRef.current;
 
@@ -538,16 +620,13 @@ export default function App() {
           0.42,
         );
 
-      const metrics = frameMetrics();
+      lastPredictionsRef.current = predictions;
 
       const activity = describeActivity(
         predictions,
-        metrics.motionScore,
-        metrics.brightness,
+        motionScoreRef.current,
+        brightnessRef.current,
       );
-
-      drawOverlay(predictions, metrics.cells);
-      setActiveZones(metrics.cells.length);
 
       const match = await recognizeFace();
 
@@ -566,7 +645,6 @@ export default function App() {
           })),
       );
 
-      setMotion(Math.round(metrics.motionScore));
       setMessage(label);
       setKind(activity.kind);
 
@@ -600,7 +678,7 @@ export default function App() {
           kind: activity.kind,
           confidence: activity.confidence,
           motionScore: Math.round(
-            metrics.motionScore,
+            motionScoreRef.current,
           ),
           objects: predictions
             .filter(
