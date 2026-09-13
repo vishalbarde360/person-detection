@@ -30,6 +30,18 @@ const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
   scoreThreshold: 0.5,
 });
 
+/*
+ * Motion sampling साठी downscaled frame size आणि
+ * त्यावर टाकलेली grid (movement zones शोधण्यासाठी).
+ */
+const SAMPLE_WIDTH = 160;
+const SAMPLE_HEIGHT = 90;
+const GRID_COLS = 8;
+const GRID_ROWS = 5;
+const CELL_WIDTH = SAMPLE_WIDTH / GRID_COLS;
+const CELL_HEIGHT = SAMPLE_HEIGHT / GRID_ROWS;
+const ZONE_MOTION_THRESHOLD = 16;
+
 function faceDistance(first, second) {
   return Math.sqrt(
     first.reduce(
@@ -43,6 +55,7 @@ function faceDistance(first, second) {
 export default function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const overlayCanvasRef = useRef(null);
   const objectModelRef = useRef(null);
 
   const streamRef = useRef(null);
@@ -63,6 +76,7 @@ export default function App() {
 
   const [objects, setObjects] = useState([]);
   const [motion, setMotion] = useState(0);
+  const [activeZones, setActiveZones] = useState(0);
 
   const [voice, setVoice] = useState(true);
   const [events, setEvents] = useState([]);
@@ -197,9 +211,18 @@ export default function App() {
     busyRef.current = false;
     recognizedRef.current = "";
 
+    const overlay = overlayCanvasRef.current;
+
+    if (overlay) {
+      overlay
+        .getContext("2d")
+        ?.clearRect(0, 0, overlay.width, overlay.height);
+    }
+
     setRunning(false);
     setObjects([]);
     setMotion(0);
+    setActiveZones(0);
     setRecognized(null);
     setMessage("Camera is off");
     setKind("idle");
@@ -213,6 +236,7 @@ export default function App() {
       return {
         motionScore: 0,
         brightness: 100,
+        cells: [],
       };
     }
 
@@ -220,8 +244,8 @@ export default function App() {
       willReadFrequently: true,
     });
 
-    canvas.width = 160;
-    canvas.height = 90;
+    canvas.width = SAMPLE_WIDTH;
+    canvas.height = SAMPLE_HEIGHT;
 
     context.drawImage(
       video,
@@ -243,13 +267,24 @@ export default function App() {
     let count = 0;
 
     const currentFrame = new Uint8Array(
-      pixels.length / 16,
+      pixels.length / 4,
+    );
+
+    /*
+     * प्रत्येक grid cell साठी वेगळा motion accumulator,
+     * जेणेकरून frame मध्ये नक्की कुठे हालचाल झाली ते कळेल.
+     */
+    const cellTotals = new Float32Array(
+      GRID_COLS * GRID_ROWS,
+    );
+    const cellCounts = new Float32Array(
+      GRID_COLS * GRID_ROWS,
     );
 
     for (
       let pixelIndex = 0, frameIndex = 0;
       pixelIndex < pixels.length;
-      pixelIndex += 16, frameIndex += 1
+      pixelIndex += 4, frameIndex += 1
     ) {
       const value =
         (pixels[pixelIndex] +
@@ -260,22 +295,151 @@ export default function App() {
       currentFrame[frameIndex] = value;
       brightness += value;
 
+      const x = frameIndex % canvas.width;
+      const y = Math.floor(frameIndex / canvas.width);
+      const cellX = Math.min(
+        GRID_COLS - 1,
+        Math.floor(x / CELL_WIDTH),
+      );
+      const cellY = Math.min(
+        GRID_ROWS - 1,
+        Math.floor(y / CELL_HEIGHT),
+      );
+      const cellIndex = cellY * GRID_COLS + cellX;
+
       if (previousFrameRef.current) {
-        difference += Math.abs(
-          value -
-            previousFrameRef.current[frameIndex],
+        const pixelDifference = Math.abs(
+          value - previousFrameRef.current[frameIndex],
         );
+
+        difference += pixelDifference;
+        cellTotals[cellIndex] += pixelDifference;
       }
 
+      cellCounts[cellIndex] += 1;
       count += 1;
     }
 
     previousFrameRef.current = currentFrame;
 
+    const cells = [];
+
+    for (let row = 0; row < GRID_ROWS; row += 1) {
+      for (let col = 0; col < GRID_COLS; col += 1) {
+        const cellIndex = row * GRID_COLS + col;
+        const cellScore = cellCounts[cellIndex]
+          ? cellTotals[cellIndex] / cellCounts[cellIndex]
+          : 0;
+
+        if (cellScore >= ZONE_MOTION_THRESHOLD) {
+          cells.push({ col, row, score: cellScore });
+        }
+      }
+    }
+
     return {
       motionScore: count ? difference / count : 0,
       brightness: count ? brightness / count : 100,
+      cells,
     };
+  }
+
+  /*
+   * detected objects (bounding boxes) आणि motion zones
+   * हे थेट video वर overlay canvas वर काढतो, जेणेकरून
+   * object आणि movement detection प्रत्यक्ष "दिसेल".
+   */
+  function drawOverlay(predictions, cells) {
+    const overlay = overlayCanvasRef.current;
+    const video = videoRef.current;
+
+    if (!overlay || !video || !video.videoWidth) {
+      return;
+    }
+
+    const rect = video.getBoundingClientRect();
+    const displayWidth = Math.round(rect.width) || video.videoWidth;
+    const displayHeight = Math.round(rect.height) || video.videoHeight;
+
+    if (
+      overlay.width !== displayWidth ||
+      overlay.height !== displayHeight
+    ) {
+      overlay.width = displayWidth;
+      overlay.height = displayHeight;
+    }
+
+    const context = overlay.getContext("2d");
+    context.clearRect(0, 0, overlay.width, overlay.height);
+
+    /*
+     * video वर object-fit: cover लागू आहे, त्यामुळे native
+     * video resolution ते displayed box असे mapping
+     * scale + centered crop offset वापरून काढतो.
+     */
+    const scale = Math.max(
+      overlay.width / video.videoWidth,
+      overlay.height / video.videoHeight,
+    );
+    const drawnWidth = video.videoWidth * scale;
+    const drawnHeight = video.videoHeight * scale;
+    const offsetX = (overlay.width - drawnWidth) / 2;
+    const offsetY = (overlay.height - drawnHeight) / 2;
+
+    // 1) Movement zones: सक्रिय grid cells हलक्या rectangles ने highlight.
+    cells.forEach(({ col, row, score }) => {
+      const cellVideoX = (col * CELL_WIDTH * video.videoWidth) / SAMPLE_WIDTH;
+      const cellVideoY = (row * CELL_HEIGHT * video.videoHeight) / SAMPLE_HEIGHT;
+      const cellVideoW = (CELL_WIDTH * video.videoWidth) / SAMPLE_WIDTH;
+      const cellVideoH = (CELL_HEIGHT * video.videoHeight) / SAMPLE_HEIGHT;
+
+      const boxX = offsetX + cellVideoX * scale;
+      const boxY = offsetY + cellVideoY * scale;
+      const boxW = cellVideoW * scale;
+      const boxH = cellVideoH * scale;
+
+      const intensity = Math.min(1, score / 60);
+
+      context.fillStyle = `rgba(255, 176, 32, ${0.12 + intensity * 0.28})`;
+      context.fillRect(boxX, boxY, boxW, boxH);
+      context.strokeStyle = "rgba(255, 176, 32, 0.55)";
+      context.lineWidth = 1;
+      context.strokeRect(boxX, boxY, boxW, boxH);
+    });
+
+    // 2) Object detection boxes.
+    predictions.forEach((prediction) => {
+      if (prediction.score <= 0.5) {
+        return;
+      }
+
+      const [x, y, width, height] = prediction.bbox;
+
+      const boxX = offsetX + x * scale;
+      const boxY = offsetY + y * scale;
+      const boxW = width * scale;
+      const boxH = height * scale;
+
+      const color =
+        prediction.class === "person" ? "#3ddc84" : "#4fa8ff";
+
+      context.strokeStyle = color;
+      context.lineWidth = 2;
+      context.strokeRect(boxX, boxY, boxW, boxH);
+
+      const label = `${prediction.class} ${Math.round(
+        prediction.score * 100,
+      )}%`;
+
+      context.font = "600 13px Arial";
+      const textWidth = context.measureText(label).width;
+
+      context.fillStyle = color;
+      context.fillRect(boxX, Math.max(0, boxY - 18), textWidth + 10, 18);
+
+      context.fillStyle = "#0d1116";
+      context.fillText(label, boxX + 5, Math.max(12, boxY - 5));
+    });
   }
 
   async function recognizeFace() {
@@ -372,6 +536,9 @@ export default function App() {
         metrics.motionScore,
         metrics.brightness,
       );
+
+      drawOverlay(predictions, metrics.cells);
+      setActiveZones(metrics.cells.length);
 
       const match = await recognizeFace();
 
@@ -653,7 +820,8 @@ export default function App() {
                 className={running ? "show" : ""}
               />
 
-              <canvas ref={canvasRef} />
+              <canvas ref={canvasRef} className="sampleCanvas" />
+              <canvas ref={overlayCanvasRef} className="overlayCanvas" />
 
               {!running && (
                 <div className="empty">
@@ -775,6 +943,13 @@ export default function App() {
                   <small>MOTION</small>
                   <strong>
                     {running ? motion : "—"}
+                  </strong>
+                </div>
+
+                <div>
+                  <small>MOVE ZONES</small>
+                  <strong>
+                    {running ? activeZones : "—"}
                   </strong>
                 </div>
 
