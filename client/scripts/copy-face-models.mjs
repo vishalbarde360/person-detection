@@ -14,7 +14,7 @@ if (!source) {
 }
 
 fs.mkdirSync(target, { recursive: true });
-const prefixes = ['tiny_face_detector', 'ssd_mobilenetv1', 'face_landmark_68', 'face_recognition'];
+const prefixes = ['tiny_face_detector', 'face_landmark_68', 'face_recognition'];
 for (const file of fs.readdirSync(source)) {
   if (prefixes.some((prefix) => file.startsWith(prefix))) {
     fs.copyFileSync(path.join(source, file), path.join(target, file));
