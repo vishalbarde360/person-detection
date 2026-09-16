@@ -92,6 +92,24 @@ const MAX_CAPTURES = 24;
 const MOTION_CAPTURE_THRESHOLD = 22;
 
 /*
+ * Registered व्यक्तीचा चेहरा light/angle/अंतर थोडं बदललं तरी
+ * थोडा जास्त distance देतो. 0.5 खूप strict होतं — त्यामुळे
+ * तीच नोंदणीकृत व्यक्ती अधूनमधून "unknown" ठरत होती. 0.55 वर
+ * false-negatives कमी होतात, खोट्या match चा धोका फार वाढत नाही.
+ */
+const MATCH_DISTANCE_THRESHOLD = 0.55;
+
+/*
+ * एका frame मध्ये चेहरा ओळखता आला नाही, इतक्यातच तो "unknown
+ * person" ठरवून screenshot काढणं टाळतो. लाईट/angle मुळे मध्येच
+ * एखादा frame flicker होऊन match miss होऊ शकतो — तेव्हा लगेच
+ * capture न घेता, सलग इतक्या analyze-cycles साठी face खरंच
+ * unmatched राहिला तरच capture घेतो (motion-zone hysteresis
+ * सारखीच पद्धत).
+ */
+const UNMATCHED_STREAK_TO_CAPTURE = 3;
+
+/*
  * Motion sampling साठी downscaled frame size आणि
  * त्यावर टाकलेली grid (movement zones शोधण्यासाठी).
  */
@@ -139,6 +157,7 @@ export default function App() {
   const recognizedNamesRef = useRef("");
   const lastUnknownCaptureRef = useRef(0);
   const lastMotionCaptureRef = useRef(0);
+  const unmatchedStreakRef = useRef(0);
 
   const busyRef = useRef(false);
   const lastEventRef = useRef("");
@@ -318,6 +337,7 @@ export default function App() {
     lastFaceMatchesRef.current = [];
     lastUnknownCaptureRef.current = 0;
     lastMotionCaptureRef.current = 0;
+    unmatchedStreakRef.current = 0;
 
     const overlay = overlayCanvasRef.current;
 
@@ -734,7 +754,7 @@ export default function App() {
        * कमी distance म्हणजे चांगला match.
        * 0.50 conservative threshold आहे.
        */
-      if (bestMatch && bestMatch.distance <= 0.5) {
+      if (bestMatch && bestMatch.distance <= MATCH_DISTANCE_THRESHOLD) {
         usedPersonIds.add(bestMatch._id);
         matches.push(bestMatch);
       }
@@ -880,10 +900,25 @@ export default function App() {
             prediction.score > 0.5,
         );
 
+      /*
+       * Streak: चेहरा unmatched राहिला तरच मोजतो; कुठल्याही
+       * cycle ला एखादी ओळखलेली व्यक्ती सापडली किंवा चेहराच
+       * नसेल, तर streak लगेच रीसेट — म्हणजे एकाच registered
+       * व्यक्तीचा एखादा frame चुकून miss झाला तरी लगेच
+       * "unknown" capture होणार नाही.
+       */
+      if (personPresent && unmatchedFaceCount > 0) {
+        unmatchedStreakRef.current += 1;
+      } else {
+        unmatchedStreakRef.current = 0;
+      }
+
       if (
         personPresent &&
         unmatchedFaceCount > 0 &&
-        knownPeopleRef.current.length > 0
+        knownPeopleRef.current.length > 0 &&
+        unmatchedStreakRef.current >=
+          UNMATCHED_STREAK_TO_CAPTURE
       ) {
         const nowMs = Date.now();
 
