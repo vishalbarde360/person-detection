@@ -25,8 +25,9 @@ const API_BASE = (
 
 const ACTIVITY_API = `${API_BASE}/api/activities`;
 const PEOPLE_API = `${API_BASE}/api/people`;
-const FACE_OPTIONS = new faceapi.SsdMobilenetv1Options({
-  minConfidence: 0.5,
+const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+  inputSize: 416,
+  scoreThreshold: 0.5,
 });
 
 /*
@@ -184,7 +185,7 @@ export default function App() {
             objectModelRef.current = model;
           }),
 
-        faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+        faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
         faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
         faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
       ]);
@@ -510,11 +511,12 @@ export default function App() {
       .withFaceLandmarks()
       .withFaceDescriptor();
 
-    if (
-      !detection ||
-      !knownPeopleRef.current.length
-    ) {
-      return null;
+    if (!detection) {
+      return { match: null, hasFace: false };
+    }
+
+    if (!knownPeopleRef.current.length) {
+      return { match: null, hasFace: true };
     }
 
     let bestMatch = null;
@@ -547,9 +549,12 @@ export default function App() {
      * कमी distance म्हणजे चांगला match.
      * 0.50 conservative threshold आहे.
      */
-    return bestMatch && bestMatch.distance <= 0.5
-      ? bestMatch
-      : null;
+    const match =
+      bestMatch && bestMatch.distance <= 0.5
+        ? bestMatch
+        : null;
+
+    return { match, hasFace: true };
   }
 
   /*
@@ -622,13 +627,14 @@ export default function App() {
 
       lastPredictionsRef.current = predictions;
 
+      const { match, hasFace } = await recognizeFace();
+
       const activity = describeActivity(
         predictions,
         motionScoreRef.current,
         brightnessRef.current,
+        hasFace,
       );
-
-      const match = await recognizeFace();
 
       setRecognized(match || null);
 
