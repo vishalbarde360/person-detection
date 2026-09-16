@@ -842,3 +842,127 @@ footer {
     order: -1;
   }
 }
+
+.captureCount {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: #76d6b14a;
+  color: #b9f4dc;
+  font-size: 11px;
+  font-weight: 700;
+}
+.capturesPanel {
+  background: #11161d;
+  border: 1px solid #ffffff14;
+  border-radius: 14px;
+  padding: 22px;
+}
+.capturesHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.capturesHeader h2 {
+  font: 700 20px Arial;
+  color: #e7eceb;
+  margin: 0 0 6px;
+}
+.capturesHeader p {
+  color: #8d9896;
+  font-size: 13px;
+  max-width: 520px;
+  margin: 0;
+}
+.ghostDanger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: #f4a3a3;
+  border: 1px solid #f4a3a34a;
+  border-radius: 10px;
+  padding: 8px 14px;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ghostDanger:hover {
+  background: #f4a3a314;
+}
+.capturesEmpty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: #71807d;
+  text-align: center;
+  padding: 50px 20px;
+}
+.capturesEmpty p {
+  max-width: 320px;
+  font-size: 13px;
+}
+.capturesGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+}
+.captureCard {
+  position: relative;
+  margin: 0;
+  background: #0d1116;
+  border: 1px solid #ffffff14;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.captureCard img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4/3;
+  object-fit: cover;
+}
+.captureCard figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+}
+.captureLabel {
+  color: #e7eceb;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.captureTime {
+  color: #71807d;
+  font-size: 11px;
+}
+.captureDownload {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: #0d1116cc;
+  border: 1px solid #ffffff1f;
+  border-radius: 8px;
+  color: #b9f4dc;
+}
+@media (max-width: 850px) {
+  .capturesHeader {
+    flex-direction: column;
+  }
+  .capturesGrid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  }
+}
