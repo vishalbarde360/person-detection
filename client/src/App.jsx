@@ -25,10 +25,42 @@ const API_BASE = (
 
 const ACTIVITY_API = `${API_BASE}/api/activities`;
 const PEOPLE_API = `${API_BASE}/api/people`;
+
+/*
+ * Phone च्या CPU/GPU वर desktop इतकं जड model + zero-delay
+ * loop चालवला की app freeze/lag होतो. म्हणून mobile device
+ * वर आपोआप हलकी settings वापरतो, desktop वर जास्त अचूक/वेगवान.
+ */
+const IS_MOBILE =
+  typeof navigator !== "undefined" &&
+  (/Android|iPhone|iPad|iPod/i.test(
+    navigator.userAgent,
+  ) ||
+    (typeof window !== "undefined" &&
+      window.matchMedia?.("(pointer: coarse)").matches));
+
 const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  inputSize: 416,
+  inputSize: IS_MOBILE ? 224 : 416,
   scoreThreshold: 0.5,
 });
+
+const OBJECT_MODEL_BASE = IS_MOBILE
+  ? "lite_mobilenet_v2"
+  : "mobilenet_v2";
+
+/*
+ * मागचं detection संपल्यावर पुढचं सुरू करण्याआधीचा gap.
+ * Desktop वर 0 (शक्य तितकं वेगवान), phone वर थोडा gap
+ * ठेवून CPU/GPU ला विश्रांती — नाहीतर overheating/hang होतं.
+ */
+const ANALYZE_LOOP_GAP = IS_MOBILE ? 200 : 0;
+
+/*
+ * Camera resolution — phone वर कमी ठेवली की decode +
+ * detection चा भार कमी होतो, त्यामुळे smooth चालतं.
+ */
+const CAMERA_WIDTH_IDEAL = IS_MOBILE ? 640 : 1280;
+const CAMERA_HEIGHT_IDEAL = IS_MOBILE ? 480 : 720;
 
 /*
  * Motion sampling साठी downscaled frame size आणि
@@ -149,8 +181,8 @@ export default function App() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
+          width: { ideal: CAMERA_WIDTH_IDEAL },
+          height: { ideal: CAMERA_HEIGHT_IDEAL },
         },
         audio: false,
       });
@@ -179,7 +211,7 @@ export default function App() {
       await Promise.all([
         cocoSsd
           .load({
-            base: "mobilenet_v2",
+            base: OBJECT_MODEL_BASE,
           })
           .then((model) => {
             objectModelRef.current = model;
@@ -566,7 +598,10 @@ export default function App() {
     await analyze();
 
     if (streamRef.current) {
-      timerRef.current = window.setTimeout(analyzeLoop, 0);
+      timerRef.current = window.setTimeout(
+        analyzeLoop,
+        ANALYZE_LOOP_GAP,
+      );
     }
   }
 
