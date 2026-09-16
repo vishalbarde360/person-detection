@@ -43,9 +43,17 @@ const IS_MOBILE =
       window.matchMedia?.("(pointer: coarse)").matches));
 
 const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  inputSize: IS_MOBILE ? 160 : 416,
+  inputSize: IS_MOBILE ? 224 : 512,
   scoreThreshold: 0.5,
 });
+
+/*
+ * एका frame मध्ये coco-ssd ने जास्तीत जास्त किती boxes परत
+ * करावेत. आधी हे 12 होतं — group photo/गर्दीत 10+ व्यक्ती
+ * + इतर objects (bottle, laptop वगैरे) एकत्र असतील तर 12
+ * बॉक्सेस पुरेसे पडत नव्हते आणि काही व्यक्ती गाळल्या जायच्या.
+ */
+const MAX_DETECTION_BOXES = IS_MOBILE ? 20 : 30;
 
 /*
  * Face recognition (landmark + 128-value descriptor काढणं) हा
@@ -116,6 +124,7 @@ export default function App() {
   const timerRef = useRef(null);
   const motionRafRef = useRef(null);
   const lastPredictionsRef = useRef([]);
+  const lastFaceMatchesRef = useRef([]);
   const motionScoreRef = useRef(0);
   const brightnessRef = useRef(100);
   const cellStabilityRef = useRef(
@@ -124,9 +133,10 @@ export default function App() {
   const lastMotionUiUpdateRef = useRef(0);
   const analyzeCycleRef = useRef(0);
   const lastFaceResultRef = useRef({
-    match: null,
-    hasFace: false,
+    matches: [],
+    faceCount: 0,
   });
+  const recognizedNamesRef = useRef("");
   const lastUnknownCaptureRef = useRef(0);
   const lastMotionCaptureRef = useRef(0);
 
@@ -151,7 +161,10 @@ export default function App() {
   const [events, setEvents] = useState([]);
 
   const [people, setPeople] = useState([]);
-  const [recognized, setRecognized] = useState(null);
+  // आधी single match object होता; आता frame मध्ये दिसणाऱ्या
+  // सगळ्या ओळखलेल्या व्यक्तींची यादी (array) ठेवतो.
+  const [recognized, setRecognized] = useState([]);
+  const [faceCount, setFaceCount] = useState(0);
 
   const [tab, setTab] = useState("live");
   const [name, setName] = useState("");
@@ -298,9 +311,11 @@ export default function App() {
     cellStabilityRef.current.fill(0);
     analyzeCycleRef.current = 0;
     lastFaceResultRef.current = {
-      match: null,
-      hasFace: false,
+      matches: [],
+      faceCount: 0,
     };
+    recognizedNamesRef.current = "";
+    lastFaceMatchesRef.current = [];
     lastUnknownCaptureRef.current = 0;
     lastMotionCaptureRef.current = 0;
 
@@ -316,7 +331,8 @@ export default function App() {
     setObjects([]);
     setMotion(0);
     setActiveZones(0);
-    setRecognized(null);
+    setRecognized([]);
+    setFaceCount(0);
     setMessage("Camera is off");
     setKind("idle");
   }
@@ -458,7 +474,7 @@ export default function App() {
    * हे थेट video वर overlay canvas वर काढतो, जेणेकरून
    * object आणि movement detection प्रत्यक्ष "दिसेल".
    */
-  function drawOverlay(predictions, cells) {
+  function drawOverlay(predictions, cells, faceMatches) {
     const overlay = overlayCanvasRef.current;
     const video = videoRef.current;
 
@@ -558,6 +574,45 @@ export default function App() {
       context.fillStyle = "#0d1116";
       context.fillText(label, boxX + 5, Math.max(12, boxY - 5));
     });
+
+    // 3) ओळखलेल्या प्रत्येक चेहऱ्यावर नावासह box —
+    //    frame मध्ये अनेक known व्यक्ती असतील तरी सगळ्या दिसतात.
+    (faceMatches || []).forEach((person) => {
+      if (!person.box) {
+        return;
+      }
+
+      const { x, y, width, height } = person.box;
+
+      const rawX = offsetX + x * scale;
+      const boxY = offsetY + y * scale;
+      const boxW = width * scale;
+      const boxH = height * scale;
+      const boxX = overlay.width - rawX - boxW;
+
+      context.strokeStyle = "#a7f3d0";
+      context.lineWidth = 2;
+      context.strokeRect(boxX, boxY, boxW, boxH);
+
+      const label = person.name;
+      context.font = "700 13px Arial";
+      const textWidth = context.measureText(label).width;
+
+      context.fillStyle = "#a7f3d0";
+      context.fillRect(
+        boxX,
+        boxY + boxH,
+        textWidth + 10,
+        18,
+      );
+
+      context.fillStyle = "#092019";
+      context.fillText(
+        label,
+        boxX + 5,
+        boxY + boxH + 13,
+      );
+    });
   }
 
   /*
@@ -604,7 +659,14 @@ export default function App() {
     );
   }
 
-  async function recognizeFace() {
+  /*
+   * आधी detectSingleFace() वापरलं जायचं — frame मध्ये कितीही
+   * चेहरे असोत, तो नेहमी फक्त एकच (सगळ्यात मोठा/confident)
+   * चेहरा परत करायचा, बाकीचे पूर्णपणे दुर्लक्षित व्हायचे.
+   * आता detectAllFaces() ने frame मधले सगळे चेहरे (10+ सुद्धा)
+   * शोधतो आणि प्रत्येकाला स्वतंत्रपणे known people शी match करतो.
+   */
+  async function recognizeFaces() {
     const video = videoRef.current;
 
     /*
@@ -615,58 +677,70 @@ export default function App() {
       !video.srcObject ||
       video.readyState < 2
     ) {
-      return null;
+      return { matches: [], faceCount: 0 };
     }
 
-    const detection = await faceapi
-      .detectSingleFace(video, FACE_OPTIONS)
+    const detections = await faceapi
+      .detectAllFaces(video, FACE_OPTIONS)
       .withFaceLandmarks()
-      .withFaceDescriptor();
+      .withFaceDescriptors();
 
-    if (!detection) {
-      return { match: null, hasFace: false };
+    if (!detections.length) {
+      return { matches: [], faceCount: 0 };
     }
 
     if (!knownPeopleRef.current.length) {
-      return { match: null, hasFace: true };
+      return { matches: [], faceCount: detections.length };
     }
 
-    let bestMatch = null;
-
-    for (const person of knownPeopleRef.current) {
-      if (
-        !Array.isArray(person.faceDescriptor) ||
-        person.faceDescriptor.length !== 128
-      ) {
-        continue;
-      }
-
-      const distance = faceDistance(
-        Array.from(detection.descriptor),
-        person.faceDescriptor,
-      );
-
-      if (
-        !bestMatch ||
-        distance < bestMatch.distance
-      ) {
-        bestMatch = {
-          ...person,
-          distance,
-        };
-      }
-    }
+    const usedPersonIds = new Set();
+    const matches = [];
 
     /*
-     * कमी distance म्हणजे चांगला match.
-     * 0.50 conservative threshold आहे.
+     * प्रत्येक चेहऱ्यासाठी स्वतंत्रपणे best match शोधतो, आणि
+     * एकाच known व्यक्तीला दोन वेगवेगळ्या चेहऱ्यांना match
+     * होण्यापासून थांबवतो (usedPersonIds).
      */
-    const match =
-      bestMatch && bestMatch.distance <= 0.5
-        ? bestMatch
-        : null;
+    for (const detection of detections) {
+      let bestMatch = null;
 
-    return { match, hasFace: true };
+      for (const person of knownPeopleRef.current) {
+        if (
+          !Array.isArray(person.faceDescriptor) ||
+          person.faceDescriptor.length !== 128 ||
+          usedPersonIds.has(person._id)
+        ) {
+          continue;
+        }
+
+        const distance = faceDistance(
+          Array.from(detection.descriptor),
+          person.faceDescriptor,
+        );
+
+        if (
+          !bestMatch ||
+          distance < bestMatch.distance
+        ) {
+          bestMatch = {
+            ...person,
+            distance,
+            box: detection.detection.box,
+          };
+        }
+      }
+
+      /*
+       * कमी distance म्हणजे चांगला match.
+       * 0.50 conservative threshold आहे.
+       */
+      if (bestMatch && bestMatch.distance <= 0.5) {
+        usedPersonIds.add(bestMatch._id);
+        matches.push(bestMatch);
+      }
+    }
+
+    return { matches, faceCount: detections.length };
   }
 
   /*
@@ -701,7 +775,11 @@ export default function App() {
     motionScoreRef.current = metrics.motionScore;
     brightnessRef.current = metrics.brightness;
 
-    drawOverlay(lastPredictionsRef.current, metrics.cells);
+    drawOverlay(
+      lastPredictionsRef.current,
+      metrics.cells,
+      lastFaceMatchesRef.current,
+    );
 
     const now = performance.now();
 
@@ -752,7 +830,7 @@ export default function App() {
       const predictions =
         await objectModelRef.current.detect(
           video,
-          12,
+          MAX_DETECTION_BOXES,
           0.42,
         );
 
@@ -767,28 +845,35 @@ export default function App() {
 
       if (shouldRunFace) {
         lastFaceResultRef.current =
-          await recognizeFace();
+          await recognizeFaces();
       }
 
-      const { match, hasFace } =
+      const { matches, faceCount } =
         lastFaceResultRef.current;
 
       const activity = describeActivity(
         predictions,
         motionScoreRef.current,
         brightnessRef.current,
-        hasFace,
+        faceCount > 0,
       );
 
-      setRecognized(match || null);
+      lastFaceMatchesRef.current = matches;
+      setRecognized(matches);
+      setFaceCount(faceCount);
 
       /*
-       * ओळख नसलेली व्यक्ती दिसली की screenshot capture —
-       * फक्त तेव्हाच जेव्हा किमान एक व्यक्ती आधीच register
-       * केलेली आहे (नाहीतर प्रत्येकच "unknown" ठरेल).
+       * ओळख नसलेली व्यक्ती (किंवा गर्दीत ओळख न पटलेले काही
+       * चेहरे) दिसले की screenshot capture — फक्त तेव्हाच जेव्हा
+       * किमान एक व्यक्ती आधीच register केलेली आहे (नाहीतर
+       * प्रत्येकच "unknown" ठरेल).
        */
+      const unmatchedFaceCount = Math.max(
+        0,
+        faceCount - matches.length,
+      );
       const personPresent =
-        hasFace ||
+        faceCount > 0 ||
         predictions.some(
           (prediction) =>
             prediction.class === "person" &&
@@ -797,7 +882,7 @@ export default function App() {
 
       if (
         personPresent &&
-        !match &&
+        unmatchedFaceCount > 0 &&
         knownPeopleRef.current.length > 0
       ) {
         const nowMs = Date.now();
@@ -807,12 +892,20 @@ export default function App() {
           UNKNOWN_CAPTURE_COOLDOWN_MS
         ) {
           lastUnknownCaptureRef.current = nowMs;
-          captureSnapshot("Unknown person detected");
+          captureSnapshot(
+            unmatchedFaceCount > 1
+              ? `${unmatchedFaceCount} unknown people detected`
+              : "Unknown person detected",
+          );
         }
       }
 
-      const label = match
-        ? `${match.name} detected · ${activity.label}`
+      const matchedNames = matches.map(
+        (person) => person.name,
+      );
+
+      const label = matchedNames.length
+        ? `${matchedNames.join(", ")} detected · ${activity.label}`
         : activity.label;
 
       setObjects(
@@ -828,23 +921,35 @@ export default function App() {
       setKind(activity.kind);
 
       /*
-       * एकच नाव सतत repeat होऊ नये म्हणून
-       * नाव बदलल्यावरच voice announcement.
+       * तीच व्यक्ती/व्यक्ती सतत repeat होऊ नयेत म्हणून
+       * ओळखलेल्या नावांचा संच (set) बदलल्यावरच voice announcement.
+       * एकाच वेळी अनेक लोक ओळखले गेले तरी एकच वाक्य बोलतो.
        */
-      if (match?.name !== recognizedRef.current) {
-        recognizedRef.current = match?.name || "";
+      const namesSignature = matchedNames
+        .slice()
+        .sort()
+        .join("|");
+
+      if (namesSignature !== recognizedNamesRef.current) {
+        recognizedNamesRef.current = namesSignature;
+        recognizedRef.current = matchedNames[0] || "";
 
         if (
-          match &&
+          matchedNames.length &&
           voiceRef.current &&
           "speechSynthesis" in window
         ) {
           window.speechSynthesis.cancel();
 
+          const speech =
+            matchedNames.length === 1
+              ? `${matchedNames[0]} detected`
+              : `${matchedNames.length} known people detected: ${matchedNames.join(
+                  ", ",
+                )}`;
+
           window.speechSynthesis.speak(
-            new SpeechSynthesisUtterance(
-              `${match.name} detected`,
-            ),
+            new SpeechSynthesisUtterance(speech),
           );
         }
       }
@@ -868,8 +973,13 @@ export default function App() {
               (prediction) =>
                 prediction.class,
             ),
-          recognizedPersonName: match?.name || "",
-          recognizedPersonId: match?._id || "",
+          // एकापेक्षा जास्त व्यक्ती ओळखल्या गेल्या तर सगळी
+          // नावं/id comma-separated string म्हणून पाठवतो
+          // (server schema अजूनही single string field आहे).
+          recognizedPersonName: matchedNames.join(", "),
+          recognizedPersonId: matches
+            .map((person) => person._id)
+            .join(","),
         };
 
         setEvents((oldEvents) => [
@@ -1248,33 +1358,64 @@ export default function App() {
             <div className="identityCard">
               <div
                 className={`avatar ${
-                  recognized ? "known" : ""
+                  recognized.length ? "known" : ""
                 }`}
               >
                 <ScanFace />
               </div>
 
-              <small>IDENTITY MATCH</small>
+              <small>
+                IDENTITY MATCH
+                {faceCount > 1 && ` · ${faceCount} FACES`}
+              </small>
 
-              <h2>
-                {recognized?.name ||
-                  (running
-                    ? "Unknown person"
-                    : "Waiting")}
-              </h2>
+              {recognized.length ? (
+                <div className="identityList">
+                  {recognized.map((person) => (
+                    <div
+                      className="identityRow"
+                      key={person._id}
+                    >
+                      <div>
+                        <h2>{person.name}</h2>
+                        <p>
+                          {person.details ||
+                            "Known profile"}
+                        </p>
+                      </div>
 
-              <p>
-                {recognized?.details ||
-                  (recognized
-                    ? "Known profile"
-                    : "No matching consented profile")}
-              </p>
+                      <span className="confidence">
+                        {person.distance.toFixed(3)}
+                      </span>
+                    </div>
+                  ))}
 
-              {recognized && (
-                <span className="confidence">
-                  Match distance{" "}
-                  {recognized.distance.toFixed(3)}
-                </span>
+                  {faceCount > recognized.length && (
+                    <p className="quiet">
+                      +{faceCount - recognized.length}{" "}
+                      unrecognized face
+                      {faceCount - recognized.length > 1
+                        ? "s"
+                        : ""}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <h2>
+                    {running
+                      ? faceCount
+                        ? `${faceCount} unknown ${
+                            faceCount > 1
+                              ? "people"
+                              : "person"
+                          }`
+                        : "Unknown person"
+                      : "Waiting"}
+                  </h2>
+
+                  <p>No matching consented profile</p>
+                </>
               )}
             </div>
 
