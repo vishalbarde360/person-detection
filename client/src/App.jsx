@@ -8,10 +8,13 @@ import {
   Camera,
   CameraOff,
   Clock3,
+  Download,
   Eye,
+  Images,
   ScanFace,
   ScanLine,
   ShieldCheck,
+  Trash2,
   UserPlus,
   Volume2,
   VolumeX,
@@ -40,9 +43,18 @@ const IS_MOBILE =
       window.matchMedia?.("(pointer: coarse)").matches));
 
 const FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
-  inputSize: IS_MOBILE ? 224 : 416,
+  inputSize: IS_MOBILE ? 160 : 416,
   scoreThreshold: 0.5,
 });
+
+/*
+ * Face recognition (landmark + 128-value descriptor काढणं) हा
+ * संपूर्ण pipeline मधला सगळ्यात जड भाग आहे. Phone वर तो प्रत्येक
+ * cycle ला न चालवता दर काही cycles नंतर चालवतो — यामुळे object
+ * detection आणि एकूण responsiveness खूप सुधारते, आणि चेहरा
+ * ओळखणं तरीही सेकंदाभरातच update होत राहतं.
+ */
+const FACE_RECOGNITION_INTERVAL = IS_MOBILE ? 3 : 1;
 
 const OBJECT_MODEL_BASE = IS_MOBILE
   ? "lite_mobilenet_v2"
@@ -61,6 +73,15 @@ const ANALYZE_LOOP_GAP = IS_MOBILE ? 200 : 0;
  */
 const CAMERA_WIDTH_IDEAL = IS_MOBILE ? 640 : 1280;
 const CAMERA_HEIGHT_IDEAL = IS_MOBILE ? 480 : 720;
+
+/*
+ * Auto-capture साठी cooldown — नाहीतर प्रत्येक cycle ला
+ * screenshot घेत राहील आणि memory भरून जाईल.
+ */
+const UNKNOWN_CAPTURE_COOLDOWN_MS = 10000;
+const MOTION_CAPTURE_COOLDOWN_MS = 10000;
+const MAX_CAPTURES = 24;
+const MOTION_CAPTURE_THRESHOLD = 22;
 
 /*
  * Motion sampling साठी downscaled frame size आणि
@@ -101,6 +122,13 @@ export default function App() {
     new Uint8Array(GRID_COLS * GRID_ROWS),
   );
   const lastMotionUiUpdateRef = useRef(0);
+  const analyzeCycleRef = useRef(0);
+  const lastFaceResultRef = useRef({
+    match: null,
+    hasFace: false,
+  });
+  const lastUnknownCaptureRef = useRef(0);
+  const lastMotionCaptureRef = useRef(0);
 
   const busyRef = useRef(false);
   const lastEventRef = useRef("");
@@ -117,6 +145,7 @@ export default function App() {
   const [objects, setObjects] = useState([]);
   const [motion, setMotion] = useState(0);
   const [activeZones, setActiveZones] = useState(0);
+  const [captures, setCaptures] = useState([]);
 
   const [voice, setVoice] = useState(true);
   const [events, setEvents] = useState([]);
@@ -267,6 +296,13 @@ export default function App() {
     motionScoreRef.current = 0;
     brightnessRef.current = 100;
     cellStabilityRef.current.fill(0);
+    analyzeCycleRef.current = 0;
+    lastFaceResultRef.current = {
+      match: null,
+      hasFace: false,
+    };
+    lastUnknownCaptureRef.current = 0;
+    lastMotionCaptureRef.current = 0;
 
     const overlay = overlayCanvasRef.current;
 
@@ -524,6 +560,50 @@ export default function App() {
     });
   }
 
+  /*
+   * सध्याचा video frame JPEG screenshot म्हणून capture करतो.
+   * हे फक्त browser च्या memory मध्ये राहतं — कुठल्याही
+   * server ला पाठवलं जात नाही (privacy-friendly).
+   */
+  function captureSnapshot(label) {
+    const video = videoRef.current;
+
+    if (!video || !video.videoWidth) {
+      return;
+    }
+
+    const snap = document.createElement("canvas");
+    snap.width = video.videoWidth;
+    snap.height = video.videoHeight;
+
+    const context = snap.getContext("2d");
+
+    /*
+     * screenshot user ला स्क्रीनवर जसं दिसतं तसंच
+     * (mirrored) दिसावं म्हणून येथेही horizontal flip.
+     */
+    context.translate(snap.width, 0);
+    context.scale(-1, 1);
+    context.drawImage(video, 0, 0, snap.width, snap.height);
+
+    const dataUrl = snap.toDataURL("image/jpeg", 0.7);
+    const timestamp = new Date();
+
+    setCaptures((previous) =>
+      [
+        {
+          id: `${timestamp.getTime()}-${Math.random()
+            .toString(36)
+            .slice(2, 8)}`,
+          dataUrl,
+          label,
+          timestamp: timestamp.toISOString(),
+        },
+        ...previous,
+      ].slice(0, MAX_CAPTURES),
+    );
+  }
+
   async function recognizeFace() {
     const video = videoRef.current;
 
@@ -631,6 +711,22 @@ export default function App() {
       setActiveZones(metrics.cells.length);
     }
 
+    /*
+     * मोठी हालचाल झाली की screenshot capture (cooldown सह,
+     * नाहीतर सतत हलत असताना खूप screenshots जमा होतील).
+     */
+    if (metrics.motionScore > MOTION_CAPTURE_THRESHOLD) {
+      const nowMs = Date.now();
+
+      if (
+        nowMs - lastMotionCaptureRef.current >
+        MOTION_CAPTURE_COOLDOWN_MS
+      ) {
+        lastMotionCaptureRef.current = nowMs;
+        captureSnapshot("Active movement detected");
+      }
+    }
+
     motionRafRef.current = requestAnimationFrame(motionTick);
   }
 
@@ -662,7 +758,20 @@ export default function App() {
 
       lastPredictionsRef.current = predictions;
 
-      const { match, hasFace } = await recognizeFace();
+      analyzeCycleRef.current += 1;
+
+      const shouldRunFace =
+        analyzeCycleRef.current %
+          FACE_RECOGNITION_INTERVAL ===
+        0;
+
+      if (shouldRunFace) {
+        lastFaceResultRef.current =
+          await recognizeFace();
+      }
+
+      const { match, hasFace } =
+        lastFaceResultRef.current;
 
       const activity = describeActivity(
         predictions,
@@ -672,6 +781,35 @@ export default function App() {
       );
 
       setRecognized(match || null);
+
+      /*
+       * ओळख नसलेली व्यक्ती दिसली की screenshot capture —
+       * फक्त तेव्हाच जेव्हा किमान एक व्यक्ती आधीच register
+       * केलेली आहे (नाहीतर प्रत्येकच "unknown" ठरेल).
+       */
+      const personPresent =
+        hasFace ||
+        predictions.some(
+          (prediction) =>
+            prediction.class === "person" &&
+            prediction.score > 0.5,
+        );
+
+      if (
+        personPresent &&
+        !match &&
+        knownPeopleRef.current.length > 0
+      ) {
+        const nowMs = Date.now();
+
+        if (
+          nowMs - lastUnknownCaptureRef.current >
+          UNKNOWN_CAPTURE_COOLDOWN_MS
+        ) {
+          lastUnknownCaptureRef.current = nowMs;
+          captureSnapshot("Unknown person detected");
+        }
+      }
 
       const label = match
         ? `${match.name} detected · ${activity.label}`
@@ -935,9 +1073,93 @@ export default function App() {
           <UserPlus />
           Register person
         </button>
+
+        <button
+          className={
+            tab === "captures" ? "active" : ""
+          }
+          onClick={() => setTab("captures")}
+        >
+          <Images />
+          Captures
+          {captures.length > 0 && (
+            <span className="captureCount">
+              {captures.length}
+            </span>
+          )}
+        </button>
       </nav>
 
-      {tab === "live" ? (
+      {tab === "captures" ? (
+        <section className="capturesPanel">
+          <div className="capturesHeader">
+            <div>
+              <h2>Auto-captured screenshots</h2>
+              <p>
+                Unknown person or big movement triggers
+                an automatic screenshot. These stay only
+                in this browser tab — nothing is
+                uploaded to any server.
+              </p>
+            </div>
+
+            {captures.length > 0 && (
+              <button
+                className="ghostDanger"
+                onClick={() => setCaptures([])}
+              >
+                <Trash2 size={16} />
+                Clear all
+              </button>
+            )}
+          </div>
+
+          {captures.length === 0 ? (
+            <div className="capturesEmpty">
+              <Images size={28} />
+              <p>
+                No captures yet. Start the camera on
+                Live recognition — screenshots will
+                appear here automatically.
+              </p>
+            </div>
+          ) : (
+            <div className="capturesGrid">
+              {captures.map((capture) => (
+                <figure
+                  key={capture.id}
+                  className="captureCard"
+                >
+                  <img
+                    src={capture.dataUrl}
+                    alt={capture.label}
+                  />
+
+                  <figcaption>
+                    <span className="captureLabel">
+                      {capture.label}
+                    </span>
+                    <span className="captureTime">
+                      {new Date(
+                        capture.timestamp,
+                      ).toLocaleString()}
+                    </span>
+                  </figcaption>
+
+                  <a
+                    className="captureDownload"
+                    href={capture.dataUrl}
+                    download={`capture-${capture.timestamp}.jpg`}
+                    title="Download"
+                  >
+                    <Download size={16} />
+                  </a>
+                </figure>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : tab === "live" ? (
         <section className="grid">
           <div className="cameraCard">
             <div className="viewport">
