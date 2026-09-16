@@ -663,6 +663,48 @@ footer {
   font-size: 10px;
 }
 
+.identityList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.identityRow {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #ffffff08;
+  border: 1px solid #ffffff10;
+  border-radius: 10px;
+}
+
+.identityRow h2 {
+  margin: 0 0 2px;
+  font-size: 16px;
+}
+
+.identityRow p {
+  margin: 0;
+  font-size: 12px;
+  color: #8f9b98;
+}
+
+.identityRow .confidence {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.identityList .quiet {
+  font-size: 11px;
+  color: #72807d;
+  text-align: center;
+  margin: 2px 0 0;
+}
+
 .registerGrid {
   display: grid;
   grid-template-columns:
